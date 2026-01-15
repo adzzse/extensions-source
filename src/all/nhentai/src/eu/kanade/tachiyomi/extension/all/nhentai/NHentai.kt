@@ -326,11 +326,11 @@ open class NHentai(
     private class SortFilter : UriPartFilter(
         "Sort By",
         arrayOf(
-            Pair("Popular: All Time", "popular"),
-            Pair("Popular: Month", "popular-month"),
-            Pair("Popular: Week", "popular-week"),
-            Pair("Popular: Today", "popular-today"),
             Pair("Recent", "date"),
+            Pair("Popular: Today", "popular-today"),
+            Pair("Popular: Week", "popular-week"),
+            Pair("Popular: Month", "popular-month"),
+            Pair("Popular: All Time", "popular"),
         ),
     )
 
