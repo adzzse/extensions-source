@@ -4,6 +4,6 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class SearchByTagDto(
-        val mangas: List<MangaDto>,
-        val tag: TagDto,
+    val mangas: List<MangaDto>,
+    val tag: TagDto,
 )

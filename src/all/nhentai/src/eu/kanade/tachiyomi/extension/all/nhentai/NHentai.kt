@@ -111,8 +111,15 @@ open class NHentai(
 
     override fun latestUpdatesNextPageSelector() = "#content > section.pagination > a.next"
 
-    override fun popularMangaRequest(page: Int) = GET(if (nhLang.isBlank()) "$baseUrl/search/?q=\"\"&sort=popular&page=$page" else "$baseUrl/language/$nhLang/popular?page=$page", headers)
-
+    override fun popularMangaRequest(page: Int) =
+        GET(
+            if (nhLang.isBlank()) {
+                "$baseUrl/search/?q=\"\"&sort=popular-today&page=$page"
+            } else {
+                "$baseUrl/search/?q=language:$nhLang&sort=popular-today&page=$page"
+            },
+            headers,
+        )
     override fun popularMangaFromElement(element: Element) = latestUpdatesFromElement(element)
 
     override fun popularMangaSelector() = latestUpdatesSelector()

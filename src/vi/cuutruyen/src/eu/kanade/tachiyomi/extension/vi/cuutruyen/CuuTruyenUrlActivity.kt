@@ -18,11 +18,11 @@ class CuuTruyenUrlActivity : Activity() {
             val id = pathSegments[1]
             try {
                 startActivity(
-                        Intent().apply {
-                            action = "eu.kanade.tachiyomi.SEARCH"
-                            putExtra("query", "${CuuTruyen.PREFIX_ID_SEARCH}$id")
-                            putExtra("filter", packageName)
-                        },
+                    Intent().apply {
+                        action = "eu.kanade.tachiyomi.SEARCH"
+                        putExtra("query", "${CuuTruyen.PREFIX_ID_SEARCH}$id")
+                        putExtra("filter", packageName)
+                    },
                 )
             } catch (e: ActivityNotFoundException) {
                 Log.e("CuuTruyenUrlActivity", e.toString())

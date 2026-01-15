@@ -5,13 +5,13 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.util.Base64
-import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.io.InputStream
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.InputStream
 
 class CuuTruyenImageInterceptor : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
@@ -35,9 +35,9 @@ class CuuTruyenImageInterceptor : Interceptor {
         val canvas = Canvas(result)
 
         val data =
-                Base64.decode(drmData, Base64.DEFAULT)
-                        .decodeXorCipher(DECRYPTION_KEY)
-                        .toString(Charsets.UTF_8)
+            Base64.decode(drmData, Base64.DEFAULT)
+                .decodeXorCipher(DECRYPTION_KEY)
+                .toString(Charsets.UTF_8)
 
         if (!data.startsWith("#v4|")) {
             throw IOException("Invalid DRM data (does not start with expected magic bytes): $data")
@@ -62,7 +62,7 @@ class CuuTruyenImageInterceptor : Interceptor {
         val k = key.toByteArray(Charsets.UTF_8)
 
         return this.mapIndexed { i, b -> (b.toInt() xor k[i % k.size].toInt()).toByte() }
-                .toByteArray()
+            .toByteArray()
     }
 
     companion object {
