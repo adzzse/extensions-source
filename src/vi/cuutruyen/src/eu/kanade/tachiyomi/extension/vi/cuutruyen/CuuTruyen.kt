@@ -1,4 +1,4 @@
-package io.github.beerpsi.tachiyomi.extension.vi.cuutruyen
+package eu.kanade.tachiyomi.extension.vi.cuutruyen
 
 import android.app.Application
 import android.content.SharedPreferences
@@ -16,9 +16,9 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
-import io.github.beerpsi.tachiyomi.extension.vi.cuutruyen.dto.MangaDto
-import io.github.beerpsi.tachiyomi.extension.vi.cuutruyen.dto.ResponseDto
-import io.github.beerpsi.tachiyomi.extension.vi.cuutruyen.dto.SearchByTagDto
+import eu.kanade.tachiyomi.extension.vi.cuutruyen.dto.MangaDto
+import eu.kanade.tachiyomi.extension.vi.cuutruyen.dto.ResponseDto
+import eu.kanade.tachiyomi.extension.vi.cuutruyen.dto.SearchByTagDto
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.CacheControl
