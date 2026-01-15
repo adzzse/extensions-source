@@ -37,11 +37,11 @@ import java.util.concurrent.TimeUnit
 class GocTruyenTranhVui : HttpSource(), ConfigurableSource {
     override val lang = "vi"
 
-    override val baseUrl = "https://goctruyentranhvui19.com"
+    override val baseUrl by lazy { getPrefBaseUrl() }
 
     override val name = "Goc Truyen Tranh Vui"
 
-    private val apiUrl = "$baseUrl/api/v2"
+    private val apiUrl by lazy { "$baseUrl/api/v2" }
 
     override val supportsLatest: Boolean = true
 
@@ -218,6 +218,19 @@ class GocTruyenTranhVui : HttpSource(), ConfigurableSource {
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         EditTextPreference(screen.context).apply {
+            key = BASE_URL_PREF
+            title = BASE_URL_PREF_TITLE
+            summary = BASE_URL_PREF_SUMMARY
+            setDefaultValue(DEFAULT_BASE_URL)
+            dialogTitle = BASE_URL_PREF_TITLE
+            dialogMessage = "Default: $DEFAULT_BASE_URL"
+            setOnPreferenceChangeListener { _, _ ->
+                Toast.makeText(screen.context, RESTART_APP, Toast.LENGTH_LONG).show()
+                true
+            }
+        }.also(screen::addPreference)
+
+        EditTextPreference(screen.context).apply {
             key = CUSTOM_TOKEN
             title = "Authorization Token"
             summary = "Enter token manually"
@@ -230,8 +243,15 @@ class GocTruyenTranhVui : HttpSource(), ConfigurableSource {
         }.also(screen::addPreference)
     }
 
+    private fun getPrefBaseUrl(): String = preferences.getString(BASE_URL_PREF, DEFAULT_BASE_URL)!!
+
     companion object {
+        private const val DEFAULT_BASE_URL = "https://goctruyentranhvui19.com"
+        private const val BASE_URL_PREF_TITLE = "Ghi đè URL cơ sở"
+        private const val BASE_URL_PREF = "overrideBaseUrl"
+        private const val BASE_URL_PREF_SUMMARY = "Dành cho sử dụng tạm thời, cập nhật tiện ích sẽ xóa cài đặt."
+
         private const val CUSTOM_TOKEN = "custom_token"
-        private const val RESTART_APP = "Khởi chạy lại ứng dụng để áp dụng token mới nhập."
+        private const val RESTART_APP = "Khởi chạy lại ứng dụng để áp dụng thay đổi."
     }
 }
