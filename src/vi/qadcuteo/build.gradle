@@ -1,0 +1,10 @@
+ext {
+    extName = 'QAD Cuteo'
+    extClass = '.QADCuteo'
+    themePkg = 'madara'
+    baseUrl = 'https://qadcuteo.cc'
+    overrideVersionCode = 2
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"
