@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.all.nhentai
 
 import android.content.SharedPreferences
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.extension.all.nhentai.NHUtils.getArtists
@@ -18,31 +19,29 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
-import eu.kanade.tachiyomi.util.asJsoup
+import eu.kanade.tachiyomi.source.online.HttpSource
 import keiyoushi.lib.randomua.addRandomUAPreferenceToScreen
 import keiyoushi.lib.randomua.getPrefCustomUA
 import keiyoushi.lib.randomua.getPrefUAType
 import keiyoushi.lib.randomua.setRandomUserAgent
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import rx.Observable
 import uy.kohesive.injekt.injectLazy
 
 open class NHentai(
     override val lang: String,
     private val nhLang: String,
-) : ParsedHttpSource(),
+) : HttpSource(),
     ConfigurableSource {
 
     final override val baseUrl = "https://nhentai.net"
+
+    private val apiUrl = "$baseUrl/api/v2"
 
     override val id by lazy { if (lang == "all") 7309872737163460316 else super.id }
 
@@ -71,9 +70,19 @@ open class NHentai(
     }
 
     private val shortenTitleRegex = Regex("""(\[[^]]*]|[({][^)}]*[)}])""")
-    private val dataRegex = Regex("""JSON\.parse\(\s*"(.*)"\s*\)""")
-    private val hentaiSelector = "script:containsData(JSON.parse):not(:containsData(media_server)):not(:containsData(avatar_url))"
     private fun String.shortenTitle() = this.replace(shortenTitleRegex, "").trim()
+
+    // CDN configuration cached lazily
+    private val cdnConfig: CdnResponse by lazy {
+        val response = client.newCall(GET("$apiUrl/cdn", apiHeaders())).execute()
+        response.parseAs<CdnResponse>()
+    }
+
+    private fun imageUrl(path: String): String = "${cdnConfig.imageServers.random()}/$path"
+
+    private fun thumbUrl(path: String): String = "${cdnConfig.thumbServers.random()}/$path"
+
+    // --- Preferences ---
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
@@ -93,43 +102,78 @@ open class NHentai(
             }
         }.also(screen::addPreference)
 
+        EditTextPreference(screen.context).apply {
+            key = API_KEY_PREF
+            title = "API Key (optional)"
+            summary = "Required for favorites. Enter your nhentai API key."
+            setDefaultValue("")
+        }.also(screen::addPreference)
+
         addRandomUAPreferenceToScreen(screen)
     }
 
-    override fun latestUpdatesRequest(page: Int) = GET(if (nhLang.isBlank()) "$baseUrl/?page=$page" else "$baseUrl/language/$nhLang/?page=$page", headers)
-
-    override fun latestUpdatesSelector() = "#content .container:not(.index-popular) .gallery"
-
-    override fun latestUpdatesFromElement(element: Element) = SManga.create().apply {
-        setUrlWithoutDomain(element.select("a").attr("href"))
-        title = element.select("a > div").text().replace("\"", "").let {
-            if (displayFullTitle) it.trim() else it.shortenTitle()
+    private fun apiHeaders() = headers.newBuilder().apply {
+        val apiKey = preferences.getString(API_KEY_PREF, "")
+        if (!apiKey.isNullOrBlank()) {
+            add("Authorization", "Key $apiKey")
         }
-        thumbnail_url = element.selectFirst(".cover img")!!.let { img ->
-            if (img.hasAttr("data-src")) img.attr("abs:data-src") else img.attr("abs:src")
-        }
+        add("Accept", "application/json")
+    }.build()
+
+    // --- Latest Updates ---
+
+    override fun latestUpdatesRequest(page: Int): Request = if (nhLang.isBlank()) {
+        GET("$apiUrl/galleries?page=$page&per_page=25", apiHeaders())
+    } else {
+        // Use search endpoint with language filter for specific languages
+        val url = "$apiUrl/search".toHttpUrl().newBuilder()
+            .addQueryParameter("query", "language:$nhLang")
+            .addQueryParameter("sort", "date")
+            .addQueryParameter("page", page.toString())
+            .build()
+        GET(url, apiHeaders())
     }
 
-    override fun latestUpdatesNextPageSelector() = "#content > section.pagination > a.next"
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        val data = response.parseAs<GalleryListResponse>()
+        val page = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
+        val mangas = data.result.map { it.toSManga() }
+        val hasNext = page < data.numPages
+        return MangasPage(mangas, hasNext)
+    }
 
-    override fun popularMangaRequest(page: Int) = GET(if (nhLang.isBlank()) "$baseUrl/search/?q=\"\"&sort=popular&page=$page" else "$baseUrl/language/$nhLang/popular?page=$page", headers)
+    // --- Popular Manga ---
 
-    override fun popularMangaFromElement(element: Element) = latestUpdatesFromElement(element)
+    override fun popularMangaRequest(page: Int): Request {
+        val url = "$apiUrl/search".toHttpUrl().newBuilder()
+            .addQueryParameter(
+                "query",
+                if (nhLang.isBlank()) "\"\"" else "language:$nhLang",
+            )
+            .addQueryParameter("sort", "popular")
+            .addQueryParameter("page", page.toString())
+            .build()
+        return GET(url, apiHeaders())
+    }
 
-    override fun popularMangaSelector() = latestUpdatesSelector()
+    override fun popularMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
 
-    override fun popularMangaNextPageSelector() = latestUpdatesNextPageSelector()
+    // --- Search ---
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = when {
+    override fun fetchSearchManga(
+        page: Int,
+        query: String,
+        filters: FilterList,
+    ): Observable<MangasPage> = when {
         query.startsWith(PREFIX_ID_SEARCH) -> {
             val id = query.removePrefix(PREFIX_ID_SEARCH)
-            client.newCall(searchMangaByIdRequest(id))
+            client.newCall(galleryDetailRequest(id))
                 .asObservableSuccess()
                 .map { response -> searchMangaByIdParse(response, id) }
         }
 
         query.toIntOrNull() != null -> {
-            client.newCall(searchMangaByIdRequest(query))
+            client.newCall(galleryDetailRequest(query))
                 .asObservableSuccess()
                 .map { response -> searchMangaByIdParse(response, query) }
         }
@@ -137,7 +181,11 @@ open class NHentai(
         else -> super.fetchSearchManga(page, query, filters)
     }
 
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+    override fun searchMangaRequest(
+        page: Int,
+        query: String,
+        filters: FilterList,
+    ): Request {
         val filterList = if (filters.isEmpty()) getFilterList() else filters
         val nhLangSearch = if (nhLang.isBlank()) "" else "language:$nhLang "
         val advQuery = combineQuery(filterList)
@@ -146,24 +194,113 @@ open class NHentai(
             filterList.findInstance<OffsetPageFilter>()?.state?.toIntOrNull()?.plus(page) ?: page
 
         if (favoriteFilter?.state == true) {
-            val url = "$baseUrl/favorites/".toHttpUrl().newBuilder()
-                .addQueryParameter("q", "$query $advQuery")
+            val url = "$apiUrl/favorites".toHttpUrl().newBuilder()
+                .addQueryParameter("q", "$query $advQuery".trim())
                 .addQueryParameter("page", offsetPage.toString())
-
-            return GET(url.build(), headers)
-        } else {
-            val url = "$baseUrl/search/".toHttpUrl().newBuilder()
-                // Blank query (Multi + sort by popular month/week/day) shows a 404 page
-                // Searching for `""` is a hacky way to return everything without any filtering
-                .addQueryParameter("q", "$query $nhLangSearch$advQuery".ifBlank { "\"\"" })
-                .addQueryParameter("page", offsetPage.toString())
-
-            filterList.findInstance<SortFilter>()?.let { f ->
-                url.addQueryParameter("sort", f.toUriPart())
-            }
-
-            return GET(url.build(), headers)
+                .build()
+            return GET(url, apiHeaders())
         }
+
+        val fullQuery = "$query $nhLangSearch$advQuery".trim().ifBlank { "\"\"" }
+        val urlBuilder = "$apiUrl/search".toHttpUrl().newBuilder()
+            .addQueryParameter("query", fullQuery)
+            .addQueryParameter("page", offsetPage.toString())
+
+        filterList.findInstance<SortFilter>()?.let { f ->
+            urlBuilder.addQueryParameter("sort", f.toUriPart())
+        }
+
+        return GET(urlBuilder.build(), apiHeaders())
+    }
+
+    override fun searchMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
+
+    private fun galleryDetailRequest(id: String) = GET("$apiUrl/galleries/$id", apiHeaders())
+
+    private fun searchMangaByIdParse(response: Response, id: String): MangasPage {
+        val details = mangaDetailsParse(response)
+        details.url = "/g/$id/"
+        return MangasPage(listOf(details), false)
+    }
+
+    // --- Manga Details ---
+
+    override fun mangaDetailsRequest(manga: SManga): Request {
+        val id = manga.url.trimEnd('/').substringAfterLast('/')
+        return galleryDetailRequest(id)
+    }
+
+    override fun mangaDetailsParse(response: Response): SManga {
+        val data = response.parseAs<GalleryDetail>()
+        return SManga.create().apply {
+            title = if (displayFullTitle) {
+                data.title.english ?: data.title.japanese ?: data.title.pretty!!
+            } else {
+                data.title.pretty
+                    ?: (data.title.english ?: data.title.japanese)!!.shortenTitle()
+            }
+            thumbnail_url = thumbUrl(data.thumbnail.path)
+            status = SManga.COMPLETED
+            artist = getArtists(data)
+            author = getGroups(data) ?: getArtists(data)
+            // Some people want these additional details in description
+            description = "Full English and Japanese titles:\n"
+                .plus(
+                    "${data.title.english ?: data.title.japanese ?: data.title.pretty ?: ""}\n",
+                )
+                .plus(data.title.japanese ?: "")
+                .plus("\n\n")
+                .plus("Pages: ${data.numPages}\n")
+                .plus("Favorited by: ${data.numFavorites}\n")
+                .plus(getTagDescription(data))
+            genre = getTags(data)
+            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+        }
+    }
+
+    // --- Chapters ---
+
+    override fun chapterListRequest(manga: SManga): Request = mangaDetailsRequest(manga)
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val data = response.parseAs<GalleryDetail>()
+        return listOf(
+            SChapter.create().apply {
+                name = "Chapter"
+                scanlator = getGroups(data)
+                date_upload = data.uploadDate * 1000
+                url = "/g/${data.id}/"
+            },
+        )
+    }
+
+    // --- Pages ---
+
+    override fun pageListRequest(chapter: SChapter): Request {
+        val id = chapter.url.trimEnd('/').substringAfterLast('/')
+        return galleryDetailRequest(id)
+    }
+
+    override fun pageListParse(response: Response): List<Page> {
+        val data = response.parseAs<GalleryDetail>()
+        return data.pages.mapIndexed { i, page ->
+            Page(
+                index = i,
+                imageUrl = imageUrl(page.path),
+            )
+        }
+    }
+
+    override fun imageUrlParse(response: Response) = throw UnsupportedOperationException()
+
+    // --- Helpers ---
+
+    private fun GalleryListItem.toSManga(): SManga = SManga.create().apply {
+        url = "/g/$id/"
+        title = (englishTitle ?: japaneseTitle ?: "Gallery #$id").let {
+            if (displayFullTitle) it.trim() else it.shortenTitle()
+        }
+        thumbnail_url = thumbUrl(thumbnail)
     }
 
     private fun combineQuery(filters: FilterList): String = buildString {
@@ -172,112 +309,21 @@ open class NHentai(
                 .map(String::trim)
                 .filterNot(String::isBlank)
                 .forEach { tag ->
-                    val y = !(filter.name == "Pages" || filter.name == "Uploaded")
+                    val quoted = filter.queryName != "pages" &&
+                        filter.queryName != "uploaded"
                     if (tag.startsWith("-")) append("-")
-                    append(filter.name, ':')
-                    if (y) append('"')
+                    append(filter.queryName, ':')
+                    if (quoted) append('"')
                     append(tag.removePrefix("-"))
-                    if (y) append('"')
+                    if (quoted) append('"')
                     append(" ")
                 }
         }
     }
 
-    private fun searchMangaByIdRequest(id: String) = GET("$baseUrl/g/$id", headers)
+    private inline fun <reified T> Response.parseAs(): T = json.decodeFromString<T>(body.string())
 
-    private fun searchMangaByIdParse(response: Response, id: String): MangasPage {
-        val details = mangaDetailsParse(response)
-        details.url = "/g/$id/"
-        return MangasPage(listOf(details), false)
-    }
-
-    override fun searchMangaParse(response: Response): MangasPage {
-        if (response.request.url.toString().contains("/login/")) {
-            val document = response.asJsoup()
-            if (document.select(".fa-sign-in").isNotEmpty()) {
-                throw Exception("Log in via WebView to view favorites")
-            }
-        }
-
-        return super.searchMangaParse(response)
-    }
-
-    override fun searchMangaFromElement(element: Element) = latestUpdatesFromElement(element)
-
-    override fun searchMangaSelector() = latestUpdatesSelector()
-
-    override fun searchMangaNextPageSelector() = latestUpdatesNextPageSelector()
-
-    override fun mangaDetailsParse(document: Document): SManga {
-        val data = document.getHentaiData()
-        val cdnUrl = document.getCdnUrls(thumbnail = true).random()
-        return SManga.create().apply {
-            title = if (displayFullTitle) data.title.english ?: data.title.japanese ?: data.title.pretty!! else data.title.pretty ?: (data.title.english ?: data.title.japanese)!!.shortenTitle()
-            thumbnail_url = "https://$cdnUrl/galleries/${data.media_id}/1t.${data.images.pages[0].extension}"
-            status = SManga.COMPLETED
-            artist = getArtists(data)
-            author = getGroups(data) ?: getArtists(data)
-            // Some people want these additional details in description
-            description = "Full English and Japanese titles:\n"
-                .plus("${data.title.english ?: data.title.japanese ?: data.title.pretty ?: ""}\n")
-                .plus(data.title.japanese ?: "")
-                .plus("\n\n")
-                .plus("Pages: ${data.images.pages.size}\n")
-                .plus("Favorited by: ${data.num_favorites}\n")
-                .plus(getTagDescription(data))
-            genre = getTags(data)
-            update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
-        }
-    }
-
-    override fun chapterListRequest(manga: SManga): Request = GET("$baseUrl${manga.url}", headers)
-
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val data = response.asJsoup().getHentaiData()
-        return listOf(
-            SChapter.create().apply {
-                name = "Chapter"
-                scanlator = getGroups(data)
-                date_upload = data.upload_date * 1000
-                setUrlWithoutDomain(response.request.url.encodedPath)
-            },
-        )
-    }
-
-    override fun chapterFromElement(element: Element) = throw UnsupportedOperationException()
-
-    override fun chapterListSelector() = throw UnsupportedOperationException()
-
-    override fun pageListParse(document: Document): List<Page> {
-        val data = document.getHentaiData()
-        val cdnUrls = document.getCdnUrls(thumbnail = false)
-
-        return data.images.pages.mapIndexed { i, image ->
-            Page(
-                index = i,
-                imageUrl = "https://${cdnUrls.random()}/galleries/${data.media_id}/${i + 1}.${image.extension}",
-            )
-        }
-    }
-
-    private fun Document.getHentaiData(): Hentai {
-        val script = selectFirst(hentaiSelector)!!.data()
-        return dataRegex.find(script)!!.groupValues[1].parseAs()
-    }
-
-    private fun Document.getCdnUrls(thumbnail: Boolean): List<String> {
-        val regex = Regex(
-            if (thumbnail) {
-                """thumb_cdn_urls:\s*(\[.*])"""
-            } else {
-                """image_cdn_urls:\s*(\[.*])"""
-            },
-        )
-        val html = body().html()
-        val cdnJson = regex.find(html)!!.groupValues[1]
-
-        return cdnJson.parseAs<List<String>>()
-    }
+    // --- Filters ---
 
     override fun getFilterList(): FilterList = FilterList(
         Filter.Header("Separate tags with commas (,)"),
@@ -301,19 +347,20 @@ open class NHentai(
         FavoriteFilter(),
     )
 
-    class TagFilter : AdvSearchEntryFilter("Tags")
-    class CategoryFilter : AdvSearchEntryFilter("Categories")
-    class GroupFilter : AdvSearchEntryFilter("Groups")
-    class ArtistFilter : AdvSearchEntryFilter("Artists")
-    class ParodyFilter : AdvSearchEntryFilter("Parodies")
-    class CharactersFilter : AdvSearchEntryFilter("Characters")
-    class UploadedFilter : AdvSearchEntryFilter("Uploaded")
-    class PagesFilter : AdvSearchEntryFilter("Pages")
-    open class AdvSearchEntryFilter(name: String) : Filter.Text(name)
+    class TagFilter : AdvSearchEntryFilter("tag", "Tags")
+    class CategoryFilter : AdvSearchEntryFilter("category", "Categories")
+    class GroupFilter : AdvSearchEntryFilter("group", "Groups")
+    class ArtistFilter : AdvSearchEntryFilter("artist", "Artists")
+    class ParodyFilter : AdvSearchEntryFilter("parody", "Parodies")
+    class CharactersFilter : AdvSearchEntryFilter("character", "Characters")
+    class UploadedFilter : AdvSearchEntryFilter("uploaded", "Uploaded")
+    class PagesFilter : AdvSearchEntryFilter("pages", "Pages")
+    open class AdvSearchEntryFilter(
+        val queryName: String,
+        displayName: String,
+    ) : Filter.Text(displayName)
 
     class OffsetPageFilter : Filter.Text("Offset results by # pages")
-
-    override fun imageUrlParse(document: Document) = throw UnsupportedOperationException()
 
     private class FavoriteFilter : Filter.CheckBox("Show favorites only", false)
 
@@ -329,15 +376,13 @@ open class NHentai(
             ),
         )
 
-    private inline fun <reified T> String.parseAs(): T {
-        val data = Regex("""\\u([0-9A-Fa-f]{4})""").replace(this) {
-            it.groupValues[1].toInt(16).toChar().toString()
-        }
-        return json.decodeFromString(
-            data,
-        )
-    }
-    private open class UriPartFilter(displayName: String, val vals: Array<Pair<String, String>>) : Filter.Select<String>(displayName, vals.map { it.first }.toTypedArray()) {
+    private open class UriPartFilter(
+        displayName: String,
+        val vals: Array<Pair<String, String>>,
+    ) : Filter.Select<String>(
+        displayName,
+        vals.map { it.first }.toTypedArray(),
+    ) {
         fun toUriPart() = vals[state].second
     }
 
@@ -346,5 +391,6 @@ open class NHentai(
     companion object {
         const val PREFIX_ID_SEARCH = "id:"
         private const val TITLE_PREF = "Display manga title as:"
+        private const val API_KEY_PREF = "api_key"
     }
 }
